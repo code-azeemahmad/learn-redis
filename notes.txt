@@ -10,6 +10,7 @@ which python3
 
 pip freeze > requirements.txt
 pip install fastapi uvicorn
+pip install -r requirements.txt
 
 tree
 
