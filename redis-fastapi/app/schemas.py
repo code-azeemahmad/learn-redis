@@ -1,3 +1,6 @@
+from datetime import datetime
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -14,3 +17,10 @@ class ProductResponse(BaseModel):
     name: str
     price: float
     category: str
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    username: str
+    email: str
+    created_at: datetime

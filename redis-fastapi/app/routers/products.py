@@ -15,7 +15,7 @@ router = APIRouter(
 
 
 # ==========================================
-# Task 2: Product Listing Caching (GET /products)
+# Product Listing Caching (GET /products)
 # ==========================================
 
 @router.get("/", response_model=list[ProductResponse])
@@ -86,7 +86,7 @@ async def create_product(
 
 
 # ==========================================
-# Task 1: Product Detail Caching (GET /products/{product_id})
+# Product Detail Caching with Pydantic (GET /products/{product_id})
 # ==========================================
 
 @router.get("/{product_id}", response_model=ProductResponse)
@@ -98,9 +98,13 @@ async def get_product(
 ):
     cache_key = f"product:{product_id}"
 
-    # STEP 1: Check Redis
+    # STEP 1: Check Redis using get_model
     try:
-        cached_product = await cache.get_json(cache_key)
+        cached_product = await cache.get_model(
+            cache_key,
+            ProductResponse,
+            ignore_corrupted=True
+        )
         if cached_product is not None:
             print("CACHE HIT")
             response.headers["X-Cache"] = "HIT"
@@ -122,21 +126,21 @@ async def get_product(
             detail="Product not found"
         )
 
-    # STEP 3: Convert database model to response data
-    product_data = ProductResponse.model_validate(product).model_dump(mode="json")
+    # STEP 3: Convert database model to Pydantic model
+    product_response = ProductResponse.model_validate(product)
 
-    # STEP 4: Store in Redis (TTL = 300 seconds)
+    # STEP 4: Store in Redis using set_model (TTL = 300 seconds)
     try:
-        await cache.set_json(cache_key, product_data, ttl=300)
+        await cache.set_model(cache_key, product_response, ttl=300)
     except RedisError:
         print("Could not populate Redis cache.")
 
-    # STEP 5: Return the product
-    return product_data
+    # STEP 5: Return the validated model
+    return product_response
 
 
 # ==========================================
-# Task 3: Cache Invalidation on Update (PUT /products/{product_id})
+# Cache Invalidation on Update (PUT /products/{product_id})
 # ==========================================
 
 @router.put("/{product_id}")
