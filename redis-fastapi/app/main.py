@@ -20,10 +20,14 @@ REDIS_URL = os.getenv(
 
 # Manage the Redis connection during application startup/shutdown
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):   # Create one Redis client per application process, reuse it across requests, and close it during shutdown.
     client = redis.from_url(
         REDIS_URL,
-        decode_responses=True
+        decode_responses=True,
+        max_connections=20,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+        health_check_interval=30,
     )
 
     try:
@@ -45,6 +49,49 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# workers ≈ number of CPU cores
+
+@app.get("/cache/{key}")
+async def get_cache(key: str, request: Request):
+
+    redis_client = request.app.state.redis
+
+    try:
+        value = await redis_client.get(key)
+
+        return {
+            "key": key,
+            "value": value
+        }
+
+    except RedisError:
+        raise HTTPException(
+            status_code=503,
+            detail="Redis is temporarily unavailable"
+        )
+
+
+@app.post("/cache/{key}")
+async def set_cache(key: str, request: Request):
+
+    redis_client = request.app.state.redis
+
+    try:
+        await redis_client.set(
+            key,
+            "Hello from FastAPI",
+            ex=300
+        )
+
+        return {
+            "message": "Value cached successfully"
+        }
+
+    except RedisError:
+        raise HTTPException(
+            status_code=503,
+            detail="Redis is temporarily unavailable"
+        )
 
 # Product request model
 class Product(BaseModel):
