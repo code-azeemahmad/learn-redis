@@ -13,6 +13,9 @@ services:
     networks:
       - app-network
 
+    ports:
+      - "127.0.0.1:6379:6379"
+
     mem_limit: 384m
 
     healthcheck:
