@@ -13,7 +13,6 @@ ENV/
 
 # Environment variables & secrets (Crucial for API keys & DB URLs)
 .env
-.env.*
 !.env.example
 
 # Distribution / packaging
