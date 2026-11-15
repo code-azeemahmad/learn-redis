@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import func, select
 
@@ -12,7 +12,11 @@ from app.config.cache import (
     PRODUCT_LIST_TTL,
     calculate_ttl,
 )
-from app.dependencies import DatabaseDependency, RedisDependency
+from app.dependencies import (
+    DatabaseDependency,
+    RateLimiterDependency,
+    RedisDependency,
+)
 from app.models import Product
 from app.schemas import ProductCreate, ProductListResponse, ProductResponse
 from app.services.cache_warming import (
@@ -243,6 +247,76 @@ async def create_product(
     await invalidate_product_caches(cache, product.id, category=product.category)
 
     return product
+
+
+# ==========================================
+# Public Products with Redis Rate Limiting (GET /products/public)
+# ==========================================
+
+@router.get("/public")
+async def get_public_products(
+    request: Request,
+    response: Response,
+    limiter: RateLimiterDependency,
+    db: DatabaseDependency,
+    limit: int = Query(100, ge=1, description="Rate limit (requests per window)"),
+    window: int = Query(60, ge=1, description="Window size in seconds")
+):
+    # 1. Identify the client IP
+    client_ip = request.client.host if request.client else "unknown"
+
+    # 2. Build Redis rate limit key
+    rate_key = f"rate:products:{client_ip}"
+
+    # 3. Check rate limit atomically via Lua script
+    try:
+        rate_info = await limiter.is_allowed(
+            rate_key,
+            limit=limit,
+            window_seconds=window
+        )
+    except RedisError:
+        # Graceful degradation / Fail-open: allow request if Redis fails
+        logger.warning("Rate limiter unavailable for %s", rate_key, exc_info=True)
+        result = await db.execute(select(Product).limit(10))
+        products = result.scalars().all()
+        return {
+            "status": "degraded_mode",
+            "client_ip": client_ip,
+            "products": [ProductResponse.model_validate(p) for p in products]
+        }
+
+    # 4. Attach standard rate-limiting HTTP headers
+    response.headers["X-RateLimit-Limit"] = str(rate_info["limit"])
+    response.headers["X-RateLimit-Remaining"] = str(rate_info["remaining"])
+    response.headers["X-RateLimit-Reset"] = str(rate_info["retry_after"])
+
+    # 5. If limit exceeded, return HTTP 429 Too Many Requests
+    if not rate_info["allowed"]:
+        response.headers["Retry-After"] = str(rate_info["retry_after"])
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Try again later.",
+            headers={
+                "Retry-After": str(rate_info["retry_after"]),
+                "X-RateLimit-Limit": str(rate_info["limit"]),
+                "X-RateLimit-Remaining": str(rate_info["remaining"]),
+                "X-RateLimit-Reset": str(rate_info["retry_after"])
+            }
+        )
+
+    # 6. Request is within limits - fetch products
+    result = await db.execute(select(Product).limit(10))
+    products = result.scalars().all()
+    return {
+        "client_ip": client_ip,
+        "rate_limit": {
+            "limit": rate_info["limit"],
+            "remaining": rate_info["remaining"],
+            "retry_after": rate_info["retry_after"]
+        },
+        "products": [ProductResponse.model_validate(p) for p in products]
+    }
 
 
 # ==========================================
