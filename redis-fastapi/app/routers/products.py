@@ -5,6 +5,13 @@ from fastapi import APIRouter, HTTPException, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import select
 
+from app.config.cache import (
+    CATEGORY_TTL,
+    NEGATIVE_CACHE_TTL,
+    PRODUCT_DETAIL_TTL,
+    PRODUCT_LIST_TTL,
+    calculate_ttl,
+)
 from app.dependencies import DatabaseDependency, RedisDependency
 from app.models import Product
 from app.schemas import ProductCreate, ProductResponse
@@ -69,8 +76,10 @@ async def get_products(
 ):
     if category:
         cache_key = f"v1:products:category:{category}"
+        base_ttl = CATEGORY_TTL
     else:
         cache_key = "v1:products:all"
+        base_ttl = PRODUCT_LIST_TTL
 
     # STEP 1: Check Redis
     try:
@@ -97,9 +106,11 @@ async def get_products(
         for product in products
     ]
 
-    # STEP 4: Store the result in Redis (TTL = 120 seconds)
+    # STEP 4: Store in Redis with jittered TTL to prevent cache stampedes
+    effective_ttl = calculate_ttl(base_ttl)
     try:
-        await cache.set_json(cache_key, products_data, ttl=120)
+        await cache.set_json(cache_key, products_data, ttl=effective_ttl)
+        logger.info("Stored listing %s with jittered TTL: %d s", cache_key, effective_ttl)
     except RedisError:
         logger.warning("Could not cache product listing for %s", cache_key)
 
@@ -190,9 +201,10 @@ async def get_product(
     product = result.scalar_one_or_none()
 
     if product is None:
-        # Negative Caching: cache non-existent record for 30s
+        # Negative Caching: cache non-existent record for NEGATIVE_CACHE_TTL
         try:
-            await cache.set_not_found(cache_key, ttl=30)
+            await cache.set_not_found(cache_key, ttl=NEGATIVE_CACHE_TTL)
+            logger.info("Negative cached %s with TTL: %d s", cache_key, NEGATIVE_CACHE_TTL)
         except RedisError:
             logger.warning("Negative cache write failed for %s", cache_key)
 
@@ -204,9 +216,11 @@ async def get_product(
     # Step 3: Convert database object to Pydantic model
     product_response = ProductResponse.model_validate(product)
 
-    # Step 4: Store in Redis (TTL = 300 seconds)
+    # Step 4: Store in Redis with jittered TTL (prevent thundering herd)
+    effective_ttl = calculate_ttl(PRODUCT_DETAIL_TTL)
     try:
-        await cache.set_model(cache_key, product_response, ttl=300)
+        await cache.set_model(cache_key, product_response, ttl=effective_ttl)
+        logger.info("Stored %s in cache with jittered TTL: %d s", cache_key, effective_ttl)
     except RedisError:
         logger.warning("Could not populate Redis cache for %s", cache_key)
 
@@ -253,7 +267,16 @@ async def update_product(
     if old_category != product.category:
         await invalidate_product_caches(cache, product.id, category=old_category)
 
-    # 4. Return updated product
+    # 4. Write-Through refresh with jittered TTL
+    cache_key = f"v1:product:{product_id}"
+    effective_ttl = calculate_ttl(PRODUCT_DETAIL_TTL)
+    try:
+        await cache.set_model(cache_key, product_response, ttl=effective_ttl)
+        logger.info("Write-Through refreshed %s with jittered TTL: %d s", cache_key, effective_ttl)
+    except RedisError:
+        logger.warning("Write-Through cache refresh failed for %s", cache_key)
+
+    # 5. Return updated product
     return product_response
 
 

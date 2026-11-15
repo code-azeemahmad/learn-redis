@@ -1,8 +1,10 @@
 from typing import Annotated, Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 
+from app.config.cache import USER_PROFILE_TTL, calculate_ttl
 from app.dependencies import get_redis_service
 from app.services.redis_service import RedisService
 
@@ -44,17 +46,18 @@ async def set_user_cache(
     cache: RedisServiceDependency
 ):
     key = f"user:{user_id}"
+    effective_ttl = calculate_ttl(USER_PROFILE_TTL)
     try:
         await cache.set_json(
             key,
             payload.model_dump(),
-            ttl=600
+            ttl=effective_ttl
         )
         return {
             "message": "User cached successfully",
             "user_id": user_id,
             "key": key,
-            "ttl": 600
+            "ttl": effective_ttl
         }
     except RedisError:
         raise HTTPException(
