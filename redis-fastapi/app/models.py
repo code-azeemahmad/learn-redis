@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, Integer, String
+from sqlalchemy import Boolean, Column, Float, Integer, String
 from app.database import Base
 
 
@@ -9,3 +9,4 @@ class Product(Base):
     name = Column(String(150), nullable=False)
     price = Column(Float, nullable=False)
     category = Column(String(100), nullable=False)
+    is_featured = Column(Boolean, default=False, nullable=False)

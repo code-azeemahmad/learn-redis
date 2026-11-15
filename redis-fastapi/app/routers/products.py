@@ -15,7 +15,12 @@ from app.config.cache import (
 from app.dependencies import DatabaseDependency, RedisDependency
 from app.models import Product
 from app.schemas import ProductCreate, ProductResponse
+from app.services.cache_warming import (
+    FEATURED_PRODUCTS_CACHE_KEY,
+    FEATURED_PRODUCTS_TTL,
+)
 from app.services.redis_service import NOT_FOUND_SENTINEL, RedisService
+from app.utils.cache_utils import get_cache_ttl
 
 router = APIRouter(
     prefix="/products",
@@ -36,13 +41,14 @@ async def invalidate_product_caches(
 ) -> None:
     """
     Centralized cache invalidation for product changes.
-    Invalidates individual detail, all listings, count, and category-specific caches.
+    Invalidates individual detail, all listings, count, featured, and category-specific caches.
     """
     keys = [
         f"v1:product:{product_id}",
         "v1:products:all",
         "v1:products:list:all",
         "v1:products:count",
+        FEATURED_PRODUCTS_CACHE_KEY,
     ]
     if category:
         keys.append(f"v1:products:category:{category}")
@@ -118,6 +124,51 @@ async def get_products(
 
 
 # ==========================================
+# Featured Products (Pre-Warmed with Jitter) (GET /products/featured)
+# ==========================================
+
+@router.get("/featured", response_model=list[ProductResponse])
+async def get_featured_products(
+    response: Response,
+    cache: RedisDependency,
+    db: DatabaseDependency
+):
+    cache_key = FEATURED_PRODUCTS_CACHE_KEY
+
+    # STEP 1: Check Redis (Pre-warmed on startup)
+    try:
+        cached_featured = await cache.get_json(cache_key)
+        if cached_featured is not None:
+            logger.info("Featured products Cache HIT: %s", cache_key)
+            response.headers["X-Cache"] = "HIT"
+            return cached_featured
+    except (RedisError, ValueError):
+        logger.warning("Redis cache read failed for %s", cache_key, exc_info=True)
+
+    # STEP 2: Cache miss - query PostgreSQL
+    logger.info("Featured products Cache MISS: %s", cache_key)
+    response.headers["X-Cache"] = "MISS"
+    result = await db.execute(
+        select(Product).where(Product.is_featured == True).limit(20)
+    )
+    products = result.scalars().all()
+    products_data = [
+        ProductResponse.model_validate(p).model_dump(mode="json")
+        for p in products
+    ]
+
+    # STEP 3: Store in Redis with get_cache_ttl jitter
+    try:
+        effective_ttl = get_cache_ttl(FEATURED_PRODUCTS_TTL, jitter=60)
+        await cache.set_json(cache_key, products_data, ttl=effective_ttl)
+        logger.info("Stored featured products in cache with jittered TTL: %d s", effective_ttl)
+    except RedisError:
+        logger.warning("Could not cache featured products")
+
+    return products_data
+
+
+# ==========================================
 # Create Product (POST /products)
 # ==========================================
 
@@ -130,7 +181,8 @@ async def create_product(
     product = Product(
         name=payload.name,
         price=payload.price,
-        category=payload.category
+        category=payload.category,
+        is_featured=payload.is_featured
     )
     db.add(product)
     await db.commit()
@@ -255,6 +307,7 @@ async def update_product(
     product.name = product_data.name
     product.price = product_data.price
     product.category = product_data.category
+    product.is_featured = product_data.is_featured
 
     # 2. Commit to PostgreSQL (source of truth first)
     await db.commit()

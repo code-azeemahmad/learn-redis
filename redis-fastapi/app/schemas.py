@@ -8,6 +8,7 @@ class ProductCreate(BaseModel):
     name: str
     price: float
     category: str
+    is_featured: bool = False
 
 
 class ProductResponse(BaseModel):
@@ -17,6 +18,7 @@ class ProductResponse(BaseModel):
     name: str
     price: float
     category: str
+    is_featured: bool = False
 
 
 class UserResponse(BaseModel):

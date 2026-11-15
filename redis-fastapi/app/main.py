@@ -12,9 +12,11 @@ from fastapi.openapi.docs import (
 )
 from fastapi.responses import HTMLResponse
 
-from app.database import Base, engine
+from app.database import AsyncSessionLocal, Base, engine
 from app.routers.cache import router as cache_router
 from app.routers.products import router as products_router
+from app.services.cache_warming import warm_featured_products
+from app.services.redis_service import RedisService
 from app.swagger_dark import DARK_CSS
 
 logging.basicConfig(
@@ -55,6 +57,14 @@ async def lifespan(app: FastAPI):
         await redis_client.ping()
         logger.info("Redis connected successfully")
         app.state.redis = redis_client
+
+        # ==========================================
+        # Cache Warming during Application Startup
+        # ==========================================
+        async with AsyncSessionLocal() as db:
+            cache = RedisService(redis_client)
+            await warm_featured_products(db, cache)
+
         yield
     finally:
         await redis_client.aclose()
