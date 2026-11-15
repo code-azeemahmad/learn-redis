@@ -13,6 +13,7 @@ from fastapi.openapi.docs import (
 from fastapi.responses import HTMLResponse
 
 from app.database import AsyncSessionLocal, Base, engine
+from app.routers.auth import router as auth_router
 from app.routers.cache import router as cache_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.products import router as products_router
@@ -83,6 +84,7 @@ app = FastAPI(
 )
 
 # Register routers
+app.include_router(auth_router)
 app.include_router(cache_router)
 app.include_router(products_router)
 app.include_router(users_router)

@@ -33,6 +33,21 @@ class UserCreate(BaseModel):
     username: str
     email: str
     full_name: str
+    password: str | None = None
+    role: str = "user"
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SessionProfileResponse(BaseModel):
+    message: str
+    user_id: int
+    role: str
+    tenant_id: str
+    created_at: str
 
 
 class UserUpdate(BaseModel):

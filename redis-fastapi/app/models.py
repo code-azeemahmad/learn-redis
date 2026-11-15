@@ -20,6 +20,8 @@ class User(Base):
     username = Column(String(100), nullable=False)
     email = Column(String(150), nullable=False)
     full_name = Column(String(150), nullable=False)
+    password_hash = Column(String(255), nullable=True)
+    role = Column(String(50), nullable=False, default="user")
 
 
 class Order(Base):
