@@ -81,10 +81,11 @@ class RedisService:
         val = await self.client.get(key)
         return val == NOT_FOUND_SENTINEL
 
-    # Cache deletion and management
-    async def delete(self, key: str) -> bool:
-        deleted = await self.client.delete(key)
-        return deleted > 0
+    # Multi-key deletion and management
+    async def delete(self, *keys: str) -> int:
+        if not keys:
+            return 0
+        return await self.client.delete(*keys)
 
     async def ping(self) -> bool:
         return await self.client.ping()

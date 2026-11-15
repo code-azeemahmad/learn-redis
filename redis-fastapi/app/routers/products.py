@@ -1,13 +1,11 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.dependencies import DatabaseDependency, RedisDependency, get_redis_service
+from app.dependencies import DatabaseDependency, RedisDependency
 from app.models import Product
 from app.schemas import ProductCreate, ProductResponse
 from app.services.redis_service import NOT_FOUND_SENTINEL, RedisService
@@ -21,6 +19,44 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
+# Centralized Cache Invalidation Helper
+# ==========================================
+
+async def invalidate_product_caches(
+    cache: RedisService,
+    product_id: int,
+    category: str | None = None
+) -> None:
+    """
+    Centralized cache invalidation for product changes.
+    Invalidates individual detail, all listings, count, and category-specific caches.
+    """
+    keys = [
+        f"v1:product:{product_id}",
+        "v1:products:all",
+        "v1:products:list:all",
+        "v1:products:count",
+    ]
+    if category:
+        keys.append(f"v1:products:category:{category}")
+
+    try:
+        deleted_count = await cache.delete(*keys)
+        logger.info(
+            "Cache invalidation SUCCESS for product %s. Keys: %s (deleted count: %s)",
+            product_id,
+            keys,
+            deleted_count
+        )
+    except RedisError:
+        logger.exception(
+            "Cache invalidation FAILED for product %s with keys: %s",
+            product_id,
+            keys
+        )
+
+
+# ==========================================
 # Product Listing Caching (GET /products)
 # ==========================================
 
@@ -28,9 +64,13 @@ logger = logging.getLogger(__name__)
 async def get_products(
     response: Response,
     cache: RedisDependency,
-    db: DatabaseDependency
+    db: DatabaseDependency,
+    category: str | None = None
 ):
-    cache_key = "v1:products:all"
+    if category:
+        cache_key = f"v1:products:category:{category}"
+    else:
+        cache_key = "v1:products:all"
 
     # STEP 1: Check Redis
     try:
@@ -45,7 +85,10 @@ async def get_products(
     # STEP 2: Cache miss - query PostgreSQL
     logger.info("Product list Cache MISS: %s", cache_key)
     response.headers["X-Cache"] = "MISS"
-    result = await db.execute(select(Product))
+    query = select(Product)
+    if category:
+        query = query.where(Product.category == category)
+    result = await db.execute(query)
     products = result.scalars().all()
 
     # STEP 3: Convert products to JSON-compatible data
@@ -82,12 +125,8 @@ async def create_product(
     await db.commit()
     await db.refresh(product)
 
-    # Invalidate product listing cache and any stale negative cache
-    try:
-        await cache.delete("v1:products:all")
-        await cache.delete(f"v1:product:{product.id}")
-    except RedisError:
-        logger.warning("Cache invalidation failed on product creation")
+    # Invalidate affected caches via centralized helper
+    await invalidate_product_caches(cache, product.id, category=product.category)
 
     return product
 
@@ -100,8 +139,8 @@ async def create_product(
 async def get_product(
     product_id: int,
     response: Response,
-    db: AsyncSession = Depends(get_db),
-    cache: RedisService = Depends(get_redis_service)
+    cache: RedisDependency,
+    db: DatabaseDependency
 ):
     cache_key = f"v1:product:{product_id}"
 
@@ -133,7 +172,6 @@ async def get_product(
                 await cache.delete(cache_key)
 
     except HTTPException:
-        # Re-raise explicit HTTP exceptions (e.g. 404 from negative cache)
         raise
     except (RedisError, ValueError):
         logger.warning(
@@ -177,15 +215,15 @@ async def get_product(
 
 
 # ==========================================
-# Write-Through Cache Update (PUT /products/{product_id})
+# Invalidation on Update (PUT /products/{product_id})
 # ==========================================
 
 @router.put("/{product_id}", response_model=ProductResponse)
 async def update_product(
     product_id: int,
     product_data: ProductCreate,
-    db: AsyncSession = Depends(get_db),
-    cache: RedisService = Depends(get_redis_service)
+    cache: RedisDependency,
+    db: DatabaseDependency
 ):
     # 1. Find product in PostgreSQL
     result = await db.execute(
@@ -199,41 +237,28 @@ async def update_product(
             detail="Product not found"
         )
 
-    # 2. Update database object
+    old_category = product.category
     product.name = product_data.name
     product.price = product_data.price
     product.category = product_data.category
 
-    # 3. Commit to PostgreSQL (source of truth first)
+    # 2. Commit to PostgreSQL (source of truth first)
     await db.commit()
     await db.refresh(product)
 
     product_response = ProductResponse.model_validate(product)
-    cache_key = f"v1:product:{product_id}"
 
-    # 4. Write-Through: Update/Refresh Redis cache immediately
-    try:
-        await cache.set_model(cache_key, product_response, ttl=300)
-        # Invalidate listing cache so listings reflect updated data
-        await cache.delete("v1:products:all")
-        logger.info("Write-Through Cache REFRESH: %s", cache_key)
-    except RedisError:
-        logger.warning(
-            "Write-Through: Redis update failed for %s. Attempting fallback eviction.",
-            cache_key,
-            exc_info=True
-        )
-        try:
-            await cache.delete(cache_key)
-        except RedisError:
-            logger.warning("Write-Through: Redis fallback delete failed for %s", cache_key)
+    # 3. Invalidate affected caches via centralized helper
+    await invalidate_product_caches(cache, product.id, category=product.category)
+    if old_category != product.category:
+        await invalidate_product_caches(cache, product.id, category=old_category)
 
-    # 5. Return updated product
+    # 4. Return updated product
     return product_response
 
 
 # ==========================================
-# Cache Invalidation on Delete (DELETE /products/{product_id})
+# Invalidation on Delete (DELETE /products/{product_id})
 # ==========================================
 
 @router.delete("/{product_id}")
@@ -253,15 +278,12 @@ async def delete_product(
             detail="Product not found"
         )
 
+    category = product.category
     await db.delete(product)
     await db.commit()
 
-    # Invalidate Redis cache
-    try:
-        await cache.delete(f"v1:product:{product_id}")
-        await cache.delete("v1:products:all")
-    except RedisError:
-        logger.exception("Failed to invalidate product cache for %s", product_id)
+    # Invalidate affected caches
+    await invalidate_product_caches(cache, product_id, category=category)
 
     return {
         "message": "Product deleted successfully",
