@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 
@@ -48,3 +49,31 @@ class UserResponse(BaseModel):
     username: str
     email: str
     full_name: str
+
+
+class DashboardStats(BaseModel):
+    total_orders: int
+    total_revenue: str
+    average_order_value: str
+
+
+class DashboardStatsResponse(BaseModel):
+    source: str
+    stats: DashboardStats
+
+
+class OrderCreate(BaseModel):
+    tenant_id: str
+    total_amount: float
+    status: str = "completed"
+    created_at: datetime | None = None
+
+
+class OrderResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    total_amount: float
+    status: str
+    created_at: datetime

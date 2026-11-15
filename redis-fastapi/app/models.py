@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Float, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, Numeric, String
 from app.database import Base
 
 
@@ -20,4 +20,15 @@ class User(Base):
     username = Column(String(100), nullable=False)
     email = Column(String(150), nullable=False)
     full_name = Column(String(150), nullable=False)
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(50), nullable=False, index=True)
+    total_amount = Column(Numeric(12, 2), nullable=False)
+    status = Column(String(50), nullable=False, default="completed")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
 

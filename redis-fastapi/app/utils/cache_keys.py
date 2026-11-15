@@ -43,3 +43,20 @@ def product_detail_cache_key(product_id: int) -> str:
     Builds a versioned Redis cache key for an individual product detail.
     """
     return f"v1:product:{product_id}"
+
+
+def dashboard_stats_cache_key(
+    tenant_id: str,
+    start_date: str,
+    end_date: str
+) -> str:
+    """
+    Builds a tenant-isolated Redis cache key for aggregated dashboard statistics.
+    """
+    tenant_part = tenant_id.strip().lower() if tenant_id else "default"
+    return (
+        f"v1:tenant:{tenant_part}:"
+        f"dashboard:stats:"
+        f"start:{start_date}:"
+        f"end:{end_date}"
+    )

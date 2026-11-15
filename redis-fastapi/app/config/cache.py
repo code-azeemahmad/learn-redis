@@ -8,7 +8,7 @@ PRODUCT_DETAIL_TTL = 300       # 5 minutes
 PRODUCT_LIST_TTL = 120         # 2 minutes
 USER_PROFILE_TTL = 600         # 10 minutes
 CATEGORY_TTL = 1800            # 30 minutes
-DASHBOARD_TTL = 60             # 1 minute
+DASHBOARD_TTL = 120            # 2 minutes
 NEGATIVE_CACHE_TTL = 30        # 30 seconds
 
 
