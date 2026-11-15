@@ -10,3 +10,14 @@ class Product(Base):
     price = Column(Float, nullable=False)
     category = Column(String(100), nullable=False)
     is_featured = Column(Boolean, default=False, nullable=False)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(String(50), nullable=False, index=True)
+    username = Column(String(100), nullable=False)
+    email = Column(String(150), nullable=False)
+    full_name = Column(String(150), nullable=False)
+

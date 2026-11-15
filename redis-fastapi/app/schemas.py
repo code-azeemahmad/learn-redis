@@ -1,6 +1,3 @@
-from datetime import datetime
-from uuid import UUID
-
 from pydantic import BaseModel, ConfigDict
 
 
@@ -21,8 +18,33 @@ class ProductResponse(BaseModel):
     is_featured: bool = False
 
 
-class UserResponse(BaseModel):
-    id: UUID
+class ProductListResponse(BaseModel):
+    source: str
+    page: int
+    limit: int
+    total: int
+    pages: int
+    products: list[ProductResponse]
+
+
+class UserCreate(BaseModel):
+    tenant_id: str
     username: str
     email: str
-    created_at: datetime
+    full_name: str
+
+
+class UserUpdate(BaseModel):
+    username: str | None = None
+    email: str | None = None
+    full_name: str | None = None
+
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tenant_id: str
+    username: str
+    email: str
+    full_name: str

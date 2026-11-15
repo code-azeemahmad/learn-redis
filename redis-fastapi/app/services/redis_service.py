@@ -87,6 +87,23 @@ class RedisService:
             return 0
         return await self.client.delete(*keys)
 
+    # Pattern-based deletion using SCAN
+    async def delete_pattern(self, pattern: str) -> int:
+        """
+        Deletes all keys matching a given pattern using non-blocking SCAN.
+        Batches deletions in chunks of 100 for optimal network efficiency.
+        """
+        deleted_count = 0
+        batch = []
+        async for key in self.client.scan_iter(match=pattern, count=100):
+            batch.append(key)
+            if len(batch) >= 100:
+                deleted_count += await self.client.delete(*batch)
+                batch = []
+        if batch:
+            deleted_count += await self.client.delete(*batch)
+        return deleted_count
+
     async def ping(self) -> bool:
         return await self.client.ping()
 

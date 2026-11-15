@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from app.database import AsyncSessionLocal, Base, engine
 from app.routers.cache import router as cache_router
 from app.routers.products import router as products_router
+from app.routers.users import router as users_router
 from app.services.cache_warming import warm_featured_products
 from app.services.redis_service import RedisService
 from app.swagger_dark import DARK_CSS
@@ -83,6 +84,7 @@ app = FastAPI(
 # Register routers
 app.include_router(cache_router)
 app.include_router(products_router)
+app.include_router(users_router)
 
 
 @app.get("/docs", include_in_schema=False)

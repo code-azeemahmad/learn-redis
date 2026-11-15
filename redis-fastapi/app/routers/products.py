@@ -1,9 +1,9 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config.cache import (
     CATEGORY_TTL,
@@ -14,12 +14,16 @@ from app.config.cache import (
 )
 from app.dependencies import DatabaseDependency, RedisDependency
 from app.models import Product
-from app.schemas import ProductCreate, ProductResponse
+from app.schemas import ProductCreate, ProductListResponse, ProductResponse
 from app.services.cache_warming import (
     FEATURED_PRODUCTS_CACHE_KEY,
     FEATURED_PRODUCTS_TTL,
 )
 from app.services.redis_service import NOT_FOUND_SENTINEL, RedisService
+from app.utils.cache_keys import (
+    product_detail_cache_key,
+    product_list_cache_key,
+)
 from app.utils.cache_utils import get_cache_ttl
 
 router = APIRouter(
@@ -41,25 +45,26 @@ async def invalidate_product_caches(
 ) -> None:
     """
     Centralized cache invalidation for product changes.
-    Invalidates individual detail, all listings, count, featured, and category-specific caches.
+    Invalidates individual detail, all paginated/filtered listings via scan_iter pattern,
+    and featured products cache.
     """
     keys = [
-        f"v1:product:{product_id}",
-        "v1:products:all",
-        "v1:products:list:all",
-        "v1:products:count",
+        product_detail_cache_key(product_id),
         FEATURED_PRODUCTS_CACHE_KEY,
+        "v1:products:all",
+        "v1:products:count",
     ]
     if category:
-        keys.append(f"v1:products:category:{category}")
+        keys.append(f"v1:products:category:{category.strip().lower()}")
 
     try:
-        deleted_count = await cache.delete(*keys)
+        deleted_fixed = await cache.delete(*keys)
+        deleted_pattern = await cache.delete_pattern("v1:products:list:*")
         logger.info(
-            "Cache invalidation SUCCESS for product %s. Keys: %s (deleted count: %s)",
+            "Cache invalidation SUCCESS for product %s. Fixed deleted: %s, List patterns deleted: %s",
             product_id,
-            keys,
-            deleted_count
+            deleted_fixed,
+            deleted_pattern
         )
     except RedisError:
         logger.exception(
@@ -73,54 +78,100 @@ async def invalidate_product_caches(
 # Product Listing Caching (GET /products)
 # ==========================================
 
-@router.get("/", response_model=list[ProductResponse])
+@router.get("/", response_model=ProductListResponse)
 async def get_products(
     response: Response,
     cache: RedisDependency,
     db: DatabaseDependency,
-    category: str | None = None
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    category: str | None = Query(None, description="Category filter"),
+    search: str | None = Query(None, description="Search term in product name"),
+    sort_by: str = Query("id", description="Field to sort by: id, price, or name"),
+    order: str = Query("desc", description="Sort order: asc or desc")
 ):
-    if category:
-        cache_key = f"v1:products:category:{category}"
-        base_ttl = CATEGORY_TTL
-    else:
-        cache_key = "v1:products:all"
-        base_ttl = PRODUCT_LIST_TTL
+    # Normalize sorting and ordering
+    allowed_sort_fields = {
+        "id": Product.id,
+        "price": Product.price,
+        "name": Product.name
+    }
+    normalized_sort_by = sort_by.strip().lower()
+    sort_column = allowed_sort_fields.get(normalized_sort_by, Product.id)
 
-    # STEP 1: Check Redis
+    normalized_order = order.strip().lower()
+    order_clause = sort_column.asc() if normalized_order == "asc" else sort_column.desc()
+
+    # 1. Generate normalized, deterministic cache key
+    cache_key = product_list_cache_key(
+        page=page,
+        limit=limit,
+        category=category,
+        search=search,
+        sort_by=normalized_sort_by,
+        order=normalized_order
+    )
+
+    # 2. Check Redis cache
     try:
-        cached_products = await cache.get_json(cache_key)
-        if cached_products is not None:
+        cached_data = await cache.get_json(cache_key)
+        if cached_data is not None:
             logger.info("Product list Cache HIT: %s", cache_key)
             response.headers["X-Cache"] = "HIT"
-            return cached_products
+            cached_data["source"] = "redis"
+            return cached_data
     except (RedisError, ValueError):
         logger.warning("Redis cache read failed for %s", cache_key, exc_info=True)
 
-    # STEP 2: Cache miss - query PostgreSQL
+    # 3. Cache Miss - Query PostgreSQL
     logger.info("Product list Cache MISS: %s", cache_key)
     response.headers["X-Cache"] = "MISS"
+
     query = select(Product)
+    count_query = select(func.count(Product.id))
+
     if category:
-        query = query.where(Product.category == category)
+        query = query.where(Product.category.ilike(category.strip()))
+        count_query = count_query.where(Product.category.ilike(category.strip()))
+    if search:
+        query = query.where(Product.name.ilike(f"%{search.strip()}%"))
+        count_query = count_query.where(Product.name.ilike(f"%{search.strip()}%"))
+
+    # Execute total count
+    total_result = await db.execute(count_query)
+    total = total_result.scalar_one()
+
+    # Apply pagination and sorting
+    offset = (page - 1) * limit
+    query = query.order_by(order_clause).offset(offset).limit(limit)
+
     result = await db.execute(query)
     products = result.scalars().all()
 
-    # STEP 3: Convert products to JSON-compatible data
-    products_data = [
+    pages = (total + limit - 1) // limit if total > 0 else 0
+    product_data = [
         ProductResponse.model_validate(product).model_dump(mode="json")
         for product in products
     ]
 
-    # STEP 4: Store in Redis with jittered TTL to prevent cache stampedes
-    effective_ttl = calculate_ttl(base_ttl)
+    response_data = {
+        "source": "postgresql",
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "pages": pages,
+        "products": product_data
+    }
+
+    # 4. Store in Redis with jittered TTL
+    effective_ttl = calculate_ttl(PRODUCT_LIST_TTL)
     try:
-        await cache.set_json(cache_key, products_data, ttl=effective_ttl)
-        logger.info("Stored listing %s with jittered TTL: %d s", cache_key, effective_ttl)
+        await cache.set_json(cache_key, response_data, ttl=effective_ttl)
+        logger.info("Stored listing %s in cache with jittered TTL: %d s", cache_key, effective_ttl)
     except RedisError:
         logger.warning("Could not cache product listing for %s", cache_key)
 
-    return products_data
+    return response_data
 
 
 # ==========================================
@@ -205,7 +256,7 @@ async def get_product(
     cache: RedisDependency,
     db: DatabaseDependency
 ):
-    cache_key = f"v1:product:{product_id}"
+    cache_key = product_detail_cache_key(product_id)
 
     # Step 1: Check Redis (Cache Hit / Negative Cache Hit)
     try:
@@ -321,7 +372,7 @@ async def update_product(
         await invalidate_product_caches(cache, product.id, category=old_category)
 
     # 4. Write-Through refresh with jittered TTL
-    cache_key = f"v1:product:{product_id}"
+    cache_key = product_detail_cache_key(product_id)
     effective_ttl = calculate_ttl(PRODUCT_DETAIL_TTL)
     try:
         await cache.set_model(cache_key, product_response, ttl=effective_ttl)
