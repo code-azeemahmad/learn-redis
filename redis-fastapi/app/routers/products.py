@@ -177,17 +177,17 @@ async def get_product(
 
 
 # ==========================================
-# Cache Invalidation on Update (PUT /products/{product_id})
+# Write-Through Cache Update (PUT /products/{product_id})
 # ==========================================
 
-@router.put("/{product_id}")
+@router.put("/{product_id}", response_model=ProductResponse)
 async def update_product(
     product_id: int,
-    payload: ProductCreate,
-    cache: RedisDependency,
-    db: DatabaseDependency
+    product_data: ProductCreate,
+    db: AsyncSession = Depends(get_db),
+    cache: RedisService = Depends(get_redis_service)
 ):
-    # Step 1: Update PostgreSQL
+    # 1. Find product in PostgreSQL
     result = await db.execute(
         select(Product).where(Product.id == product_id)
     )
@@ -199,22 +199,37 @@ async def update_product(
             detail="Product not found"
         )
 
-    product.name = payload.name
-    product.price = payload.price
-    product.category = payload.category
+    # 2. Update database object
+    product.name = product_data.name
+    product.price = product_data.price
+    product.category = product_data.category
+
+    # 3. Commit to PostgreSQL (source of truth first)
     await db.commit()
+    await db.refresh(product)
 
-    # Step 2: Invalidate Redis cache
+    product_response = ProductResponse.model_validate(product)
+    cache_key = f"v1:product:{product_id}"
+
+    # 4. Write-Through: Update/Refresh Redis cache immediately
     try:
-        await cache.delete(f"v1:product:{product_id}")
+        await cache.set_model(cache_key, product_response, ttl=300)
+        # Invalidate listing cache so listings reflect updated data
         await cache.delete("v1:products:all")
+        logger.info("Write-Through Cache REFRESH: %s", cache_key)
     except RedisError:
-        logger.exception("Failed to invalidate product cache for %s", product_id)
+        logger.warning(
+            "Write-Through: Redis update failed for %s. Attempting fallback eviction.",
+            cache_key,
+            exc_info=True
+        )
+        try:
+            await cache.delete(cache_key)
+        except RedisError:
+            logger.warning("Write-Through: Redis fallback delete failed for %s", cache_key)
 
-    return {
-        "message": "Product updated successfully",
-        "product_id": product_id
-    }
+    # 5. Return updated product
+    return product_response
 
 
 # ==========================================
