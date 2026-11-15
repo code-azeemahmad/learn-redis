@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +17,12 @@ from app.routers.cache import router as cache_router
 from app.routers.products import router as products_router
 from app.swagger_dark import DARK_CSS
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 env_path = Path(__file__).resolve().parent / ".env"
 if env_path.exists():
@@ -32,7 +39,7 @@ async def lifespan(app: FastAPI):
     # Ensure PostgreSQL database tables are created
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("Database tables initialized successfully")
+    logger.info("Database tables initialized successfully")
 
     # Initialize shared Redis connection pool
     redis_client = redis.from_url(
@@ -46,14 +53,14 @@ async def lifespan(app: FastAPI):
 
     try:
         await redis_client.ping()
-        print("Redis connected successfully")
+        logger.info("Redis connected successfully")
         app.state.redis = redis_client
-        yield 
+        yield
     finally:
         await redis_client.aclose()
-        print("Redis connection closed")
+        logger.info("Redis connection closed")
         await engine.dispose()
-        print("Database connections disposed")
+        logger.info("Database connections disposed")
 
 
 # Disable default docs_url so our custom dark_swagger_ui takes precedence at /docs

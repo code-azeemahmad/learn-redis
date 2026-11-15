@@ -1,17 +1,23 @@
+import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.dependencies import DatabaseDependency, RedisDependency
+from app.database import get_db
+from app.dependencies import DatabaseDependency, RedisDependency, get_redis_service
 from app.models import Product
 from app.schemas import ProductCreate, ProductResponse
+from app.services.redis_service import NOT_FOUND_SENTINEL, RedisService
 
 router = APIRouter(
     prefix="/products",
     tags=["Products"]
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ==========================================
@@ -24,20 +30,20 @@ async def get_products(
     cache: RedisDependency,
     db: DatabaseDependency
 ):
-    cache_key = "products:all"
+    cache_key = "v1:products:all"
 
     # STEP 1: Check Redis
     try:
         cached_products = await cache.get_json(cache_key)
         if cached_products is not None:
-            print("PRODUCT LIST CACHE HIT")
+            logger.info("Product list Cache HIT: %s", cache_key)
             response.headers["X-Cache"] = "HIT"
             return cached_products
-    except RedisError:
-        print("Redis unavailable. Querying PostgreSQL.")
+    except (RedisError, ValueError):
+        logger.warning("Redis cache read failed for %s", cache_key, exc_info=True)
 
-    # STEP 2: Query PostgreSQL
-    print("PRODUCT LIST CACHE MISS")
+    # STEP 2: Cache miss - query PostgreSQL
+    logger.info("Product list Cache MISS: %s", cache_key)
     response.headers["X-Cache"] = "MISS"
     result = await db.execute(select(Product))
     products = result.scalars().all()
@@ -52,7 +58,7 @@ async def get_products(
     try:
         await cache.set_json(cache_key, products_data, ttl=120)
     except RedisError:
-        print("Could not cache product listing.")
+        logger.warning("Could not cache product listing for %s", cache_key)
 
     return products_data
 
@@ -76,66 +82,97 @@ async def create_product(
     await db.commit()
     await db.refresh(product)
 
-    # Invalidate product listing cache
+    # Invalidate product listing cache and any stale negative cache
     try:
-        await cache.delete("products:all")
+        await cache.delete("v1:products:all")
+        await cache.delete(f"v1:product:{product.id}")
     except RedisError:
-        print("Cache invalidation failed for products listing.")
+        logger.warning("Cache invalidation failed on product creation")
 
     return product
 
 
 # ==========================================
-# Product Detail Caching with Pydantic (GET /products/{product_id})
+# Cache-Aside: Product Detail (GET /products/{product_id})
 # ==========================================
 
 @router.get("/{product_id}", response_model=ProductResponse)
 async def get_product(
     product_id: int,
     response: Response,
-    cache: RedisDependency,
-    db: DatabaseDependency
+    db: AsyncSession = Depends(get_db),
+    cache: RedisService = Depends(get_redis_service)
 ):
-    cache_key = f"product:{product_id}"
+    cache_key = f"v1:product:{product_id}"
 
-    # STEP 1: Check Redis using get_model
+    # Step 1: Check Redis (Cache Hit / Negative Cache Hit)
     try:
-        cached_product = await cache.get_model(
-            cache_key,
-            ProductResponse,
-            ignore_corrupted=True
-        )
-        if cached_product is not None:
-            print("CACHE HIT")
-            response.headers["X-Cache"] = "HIT"
-            return cached_product
-    except RedisError:
-        print("Redis unavailable. Continuing with PostgreSQL.")
+        raw_val = await cache.get_raw(cache_key)
 
-    # STEP 2: Cache miss - query PostgreSQL
-    print("CACHE MISS")
+        # Check negative cache marker
+        if raw_val == NOT_FOUND_SENTINEL:
+            logger.info("Cache HIT (Negative): %s", cache_key)
+            response.headers["X-Cache"] = "HIT-NEGATIVE"
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found"
+            )
+
+        if raw_val is not None:
+            try:
+                cached_product = ProductResponse.model_validate_json(raw_val)
+                logger.info("Cache HIT: %s", cache_key)
+                response.headers["X-Cache"] = "HIT"
+                return cached_product
+            except (ValueError, Exception):
+                logger.warning(
+                    "Corrupted cache entry for %s, evicting",
+                    cache_key,
+                    exc_info=True
+                )
+                await cache.delete(cache_key)
+
+    except HTTPException:
+        # Re-raise explicit HTTP exceptions (e.g. 404 from negative cache)
+        raise
+    except (RedisError, ValueError):
+        logger.warning(
+            "Redis cache read failed for %s",
+            cache_key,
+            exc_info=True
+        )
+
+    # Step 2: Cache miss - query PostgreSQL
+    logger.info("Cache MISS: %s", cache_key)
     response.headers["X-Cache"] = "MISS"
+
     result = await db.execute(
         select(Product).where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
 
     if product is None:
+        # Negative Caching: cache non-existent record for 30s
+        try:
+            await cache.set_not_found(cache_key, ttl=30)
+        except RedisError:
+            logger.warning("Negative cache write failed for %s", cache_key)
+
         raise HTTPException(
             status_code=404,
             detail="Product not found"
         )
 
-    # STEP 3: Convert database model to Pydantic model
+    # Step 3: Convert database object to Pydantic model
     product_response = ProductResponse.model_validate(product)
 
-    # STEP 4: Store in Redis using set_model (TTL = 300 seconds)
+    # Step 4: Store in Redis (TTL = 300 seconds)
     try:
         await cache.set_model(cache_key, product_response, ttl=300)
     except RedisError:
-        print("Could not populate Redis cache.")
+        logger.warning("Could not populate Redis cache for %s", cache_key)
 
-    # STEP 5: Return the validated model
+    # Step 5: Return product
     return product_response
 
 
@@ -150,7 +187,7 @@ async def update_product(
     cache: RedisDependency,
     db: DatabaseDependency
 ):
-    # STEP 1: Update PostgreSQL
+    # Step 1: Update PostgreSQL
     result = await db.execute(
         select(Product).where(Product.id == product_id)
     )
@@ -167,12 +204,12 @@ async def update_product(
     product.category = payload.category
     await db.commit()
 
-    # STEP 2: Invalidate Redis cache
+    # Step 2: Invalidate Redis cache
     try:
-        await cache.delete(f"product:{product_id}")
-        await cache.delete("products:all")
+        await cache.delete(f"v1:product:{product_id}")
+        await cache.delete("v1:products:all")
     except RedisError:
-        print("Cache invalidation failed.")
+        logger.exception("Failed to invalidate product cache for %s", product_id)
 
     return {
         "message": "Product updated successfully",
@@ -181,7 +218,7 @@ async def update_product(
 
 
 # ==========================================
-# Delete Product & Invalidate Cache (DELETE /products/{product_id})
+# Cache Invalidation on Delete (DELETE /products/{product_id})
 # ==========================================
 
 @router.delete("/{product_id}")
@@ -206,10 +243,10 @@ async def delete_product(
 
     # Invalidate Redis cache
     try:
-        await cache.delete(f"product:{product_id}")
-        await cache.delete("products:all")
+        await cache.delete(f"v1:product:{product_id}")
+        await cache.delete("v1:products:all")
     except RedisError:
-        print("Cache invalidation failed.")
+        logger.exception("Failed to invalidate product cache for %s", product_id)
 
     return {
         "message": "Product deleted successfully",
