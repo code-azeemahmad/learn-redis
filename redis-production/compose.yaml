@@ -11,6 +11,7 @@ services:
     volumes:
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - ./redis/users.acl:/usr/local/etc/redis/users.acl:ro
+      - ./redis/certs:/usr/local/etc/redis/certs:ro
 
     environment:
       HEALTHCHECK_REDIS_PASSWORD: ${HEALTHCHECK_REDIS_PASSWORD:?Set health-check password}
@@ -23,7 +24,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - 'redis-cli --user healthcheck --pass "$$HEALTHCHECK_REDIS_PASSWORD" ping | grep -q PONG'
+        - 'redis-cli --tls --cacert /usr/local/etc/redis/certs/ca.crt --user healthcheck --pass "$$HEALTHCHECK_REDIS_PASSWORD" ping | grep -q PONG'
       interval: 10s
       timeout: 3s
       retries: 5

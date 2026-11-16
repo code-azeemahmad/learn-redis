@@ -1,0 +1,58 @@
+redis-production/
+│
+├── compose.yaml
+├── .env
+│
+├── redis/
+│   ├── redis.conf
+│   ├── users.acl
+│   └── certs/
+│       ├── ca.crt
+│       ├── redis.crt
+│       └── redis.key
+│
+└── .gitignore
+
+cd redis
+mkdir -p certs
+cd certs
+
+openssl genrsa -out ca.key 4096
+
+openssl req -x509 -new -nodes \
+  -key ca.key \
+  -sha256 \
+  -days 3650 \
+  -out ca.crt \
+  -subj "/CN=Redis-Private-CA"
+
+
+openssl genrsa -out redis.key 2048
+
+
+openssl req -new \
+  -key redis.key \
+  -out redis.csr \
+  -subj "/CN=redis"
+
+
+subjectAltName = DNS:redis
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment
+
+docker compose exec redis redis-cli --user fastapi --pass "YOUR_FASTAPI_PASSWORD"
+
+(.venv) pc@DESKTOP-8VD0LFB:~/projects/learn-redis/redis-production/redis$ tree
+.
+├── certs
+│   ├── ca.crt
+│   ├── ca.key
+│   ├── ca.srl
+│   ├── redis-ext.cnf
+│   ├── redis.crt
+│   ├── redis.csr
+│   └── redis.key
+├── redis.conf
+└── users.acl
+
+docker compose exec redis redis-cli --tls --cacert /usr/local/etc/redis/certs/ca.crt   --user fastapi   --pass "<>"
