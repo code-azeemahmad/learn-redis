@@ -2,20 +2,18 @@ services:
   redis:
     image: redis:8-alpine
     container_name: redis-cache
-
     restart: unless-stopped
 
     command:
       - redis-server
       - /usr/local/etc/redis/redis.conf
-      - --requirepass
-      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
 
     volumes:
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./redis/users.acl:/usr/local/etc/redis/users.acl:ro
 
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      HEALTHCHECK_REDIS_PASSWORD: ${HEALTHCHECK_REDIS_PASSWORD:?Set health-check password}
 
     networks:
       - app-network
@@ -25,7 +23,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -q PONG'
+        - 'redis-cli --user healthcheck --pass "$$HEALTHCHECK_REDIS_PASSWORD" ping | grep -q PONG'
       interval: 10s
       timeout: 3s
       retries: 5
