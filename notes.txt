@@ -21,3 +21,5 @@ Redis connection pooling
 uvicorn app.main:app --workers 4
 
 Connection pooling vs rate limiting
+
+python -c "import secrets; print(secrets.token_urlsafe(32))"

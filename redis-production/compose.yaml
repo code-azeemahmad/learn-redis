@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: redis-cache
+
+    restart: unless-stopped
+
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+    networks:
+      - app-network
+
+    mem_limit: 384m
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -q PONG'
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  app-network:
+    driver: bridge
